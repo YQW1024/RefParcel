@@ -7,7 +7,7 @@ The method integrates a nonlinearly registered standard atlas as spatial priors 
 
 ## Create a Virtual Environment
 ```bash
-conda create -n umamba_env python=3.10 -y
+conda create -n RefParcel_env python=3.10 -y
 ```
 ## Install PyTorch 2.0.1
 ```bash
