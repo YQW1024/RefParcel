@@ -3,7 +3,7 @@ RefParcel: reference-driven attention-fused U-Mamba for arbitrary anatomical fin
 ## Overview
 This repository contains the implementation of **RefParcel**, a deep learning framework designed for arbitrary anatomical fine-scale parcellation from diffusion MRI (dMRI).  
 The method integrates a nonlinearly registered standard atlas as spatial priors with seven diffusion-derived features, and leverages a hybrid U-Mamba architecture enhanced with channel attention to effectively capture both local and global structural characteristics.  
-![Overview of RefParcel](images/overview.png)
+![Overview of RefParcel](image/overview.png)
 
 ## Create a Virtual Environment
 ```bash
