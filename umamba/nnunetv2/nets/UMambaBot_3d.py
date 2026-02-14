@@ -21,29 +21,31 @@ from torch.cuda.amp import autocast
 from dynamic_network_architectures.building_blocks.residual import BasicBlockD
 
 
-# jia
+#
 class ChannelAttention(nn.Module):
     def __init__(self, in_channels, reduction_ratio=16):
         super(ChannelAttention, self).__init__()
-        self.global_avg_pool = nn.AdaptiveAvgPool3d(1)  # [B, C, 1, 1, 1]
-        self.fc1 = nn.Conv3d(in_channels, in_channels // reduction_ratio, kernel_size=1, bias=False)
-        self.relu = nn.ReLU(inplace=True)
-        self.fc2 = nn.Conv3d(in_channels // reduction_ratio, in_channels, kernel_size=1, bias=False)
+        # SACA module design:
+        # It replaces global average pooling with a 1x1 convolution to preserve spatial dimensions.
+        # reduction_ratio is kept for argument compatibility but is not used in this specific implementation.
+        self.conv = nn.Conv3d(in_channels, in_channels, kernel_size=1, bias=True)
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
-        attention = self.global_avg_pool(x)
-        attention = self.fc1(attention)
-        attention = self.relu(attention)
-        attention = self.fc2(attention)
-        attention = self.sigmoid(attention)
-        B, C, _, _, _ = attention.shape
-        #   for b in range(B):
-        #       att = attention[b].view(-1)
-        #       print(f"  Sample {b}: ", att.cpu().detach().numpy())
+        # x shape: [B, C, D, H, W]
 
+        # Equation (1): M = Sigmoid(Conv1x1(X))
+        # This generates a voxel-wise weight map with the same spatial size as input
+        attention = self.conv(x)
+        attention = self.sigmoid(attention)
+
+        # Equation (2): X = M * X
+        # Element-wise multiplication to recalibrate features
         out = x * attention
+
+        # Flatten weights for return consistency (optional depending on your usage needs)
         weights = attention.view(x.shape[0], -1)
+
         return out, weights
 
 
@@ -128,30 +130,29 @@ class BasicResBlock(nn.Module):
         else:
             self.conv3 = None
 
-        # ���ͨ��ע����jia
+        # Initialize Channel Attention (SACA) if enabled
         if self.use_channel_attention:
             self.channel_attention = ChannelAttention(output_channels)
 
     def forward(self, x):
-
-        #    print("x:", x.shape)
         y = self.conv1(x)
-        #    print("conv1:", y.shape)
         y = self.act1(self.norm1(y))
-        #    print("norm1 + act1:", y.shape)
-        y = self.norm2(self.conv2(y))
-        #    print("conv2 + norm2:", y.shape)
 
-        # ���������ͨ��ע��������Ӧ��jia
+        y = self.conv2(y)
+        y = self.norm2(y)
+
+        # Apply Channel Attention (SACA) before residual addition
         if self.use_channel_attention:
-            y, weights = self.channel_attention(y)
-
-        #        print("attention:", y.shape)
-        #        print("attention weight:", weights.shape)
+            # The modified ChannelAttention returns (output, weights)
+            # We only need the output 'y' for the network flow, 'weights' can be ignored or logged
+            y, _ = self.channel_attention(y)
 
         if self.conv3:
-            x = self.conv3(x)
-        y += x
+            residual = self.conv3(x)
+        else:
+            residual = x
+
+        y += residual
         return self.act2(y)
 
 
@@ -172,10 +173,10 @@ class UNetResEncoder(nn.Module):
                  return_skips: bool = False,
                  stem_channels: int = None,
                  pool_type: str = 'conv',
-                 use_channel_attention=False  # jia
+                 use_channel_attention=False
                  ):
         super().__init__()
-        self.use_channel_attention = use_channel_attention  # jia
+        self.use_channel_attention = use_channel_attention
         if isinstance(kernel_sizes, int):
             kernel_sizes = [kernel_sizes] * n_stages
         if isinstance(features_per_stage, int):
@@ -202,6 +203,7 @@ class UNetResEncoder(nn.Module):
 
         stem_channels = features_per_stage[0]
 
+        # Stem Construction
         self.stem = nn.Sequential(
             BasicResBlock(
                 conv_op=conv_op,
@@ -218,17 +220,20 @@ class UNetResEncoder(nn.Module):
                 use_channel_attention=use_channel_attention
             ),
             *[
-                BasicBlockD(
+                # FIX: Changed BasicBlockD to BasicResBlock here
+                BasicResBlock(
                     conv_op=conv_op,
                     input_channels=stem_channels,
                     output_channels=stem_channels,
-                    kernel_size=kernel_sizes[0],
-                    stride=1,
-                    conv_bias=conv_bias,
                     norm_op=norm_op,
                     norm_op_kwargs=norm_op_kwargs,
+                    kernel_size=kernel_sizes[0],
+                    padding=self.conv_pad_sizes[0],
+                    stride=1,
+                    use_1x1conv=False,
                     nonlin=nonlin,
                     nonlin_kwargs=nonlin_kwargs,
+                    use_channel_attention=use_channel_attention
                 ) for _ in range(n_blocks_per_stage[0] - 1)
             ]
         )
@@ -250,20 +255,23 @@ class UNetResEncoder(nn.Module):
                     use_1x1conv=True,
                     nonlin=nonlin,
                     nonlin_kwargs=nonlin_kwargs,
-                    use_channel_attention=use_channel_attention  # jia
+                    use_channel_attention=use_channel_attention
                 ),
                 *[
-                    BasicBlockD(
+                    # FIX: Changed BasicBlockD to BasicResBlock here
+                    BasicResBlock(
                         conv_op=conv_op,
                         input_channels=features_per_stage[s],
                         output_channels=features_per_stage[s],
-                        kernel_size=kernel_sizes[s],
-                        stride=1,
-                        conv_bias=conv_bias,
                         norm_op=norm_op,
                         norm_op_kwargs=norm_op_kwargs,
+                        kernel_size=kernel_sizes[s],
+                        padding=self.conv_pad_sizes[s],
+                        stride=1,
+                        use_1x1conv=False,
                         nonlin=nonlin,
                         nonlin_kwargs=nonlin_kwargs,
+                        use_channel_attention=use_channel_attention
                     ) for _ in range(n_blocks_per_stage[s] - 1)
                 ]
             )
@@ -288,12 +296,12 @@ class UNetResEncoder(nn.Module):
     def forward(self, x):
         if self.stem is not None:
             x = self.stem(x)
-        #   print(f"Stem Output: {x.shape}")  # ��ӡ stem �������״jia
+
         ret = []
         for s in self.stages:
             x = s(x)
-            #   print(f"Stage Output: {x.shape}")  # ��ӡÿ���׶ε������״jia
             ret.append(x)
+
         if self.return_skips:
             return ret
         else:
